@@ -1,0 +1,187 @@
+services:
+## MariaDB and Redis (optional)
+  db:
+    image: mysql:9
+    container_name: pixelfed-db
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - ./mysql-9-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pixelfed-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: pixelfed-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - ./redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - pixelfed-network
+
+## Pixelfed containers - App (Web/API), Horizon Queue, Scheduled task.
+  pixelfed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pixelfed-app
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+#      - "18080:80"
+#      - "8443:443"
+#    expose:
+#      - "8080"
+    env_file:
+      - .env
+    environment:
+      # SSL Configuration (handled by reverse proxy)
+#      SSL_MODE: "off"
+      WEB_SERVER_CONFIG_PATH: /etc/nginx/conf.d/pixelfed.conf
+      # 서버사이드업 이미지 특화 설정: 보안 헤더 비활성화 시도
+      PHP_AS_WEB_SERVER: 1
+
+      # PHP Configuration
+      PHP_POST_MAX_SIZE: "500M"
+      PHP_UPLOAD_MAX_FILE_SIZE: "500M"
+      PHP_OPCACHE_ENABLE: "1"
+      
+      # Laravel Auto-run Configuration
+      AUTORUN_ENABLED: "true"
+      AUTORUN_LARAVEL_MIGRATION: "true"
+      AUTORUN_LARAVEL_MIGRATION_ISOLATION: "true"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_EVENT_CACHE: "true"
+      AUTORUN_LARAVEL_ROUTE_CACHE: "true"
+      AUTORUN_LARAVEL_VIEW_CACHE: "true"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+
+    volumes:
+      # - ./storage:/var/www/html/storage
+      # - ./bootstrap/cache:/var/www/html/bootstrap/cache
+      - .:/var/www/html           # 현재 폴더(.)를 컨테이너의 /var/www/html로 연결
+      - ./.env:/var/www/html/.env # .env 파일을 명시적으로 연결
+      - /home/delee/SemComp/TACO/data/MSCOCO:/mnt/mscoco:ro
+#      - ./pixelfed:/var/www/html
+    depends_on:
+      - db
+      - redis
+    networks:
+      - pixelfed-network
+
+  horizon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pixelfed-horizon
+    restart: unless-stopped
+    command: ["php", "artisan", "horizon"]
+    env_file:
+      - .env
+    environment:
+      # Laravel Auto-run Configuration
+      # Add by delee
+      REDIS_HOST: "redis"
+      AUTORUN_ENABLED: "false"
+      AUTORUN_LARAVEL_MIGRATION: "false"
+      AUTORUN_LARAVEL_MIGRATION_ISOLATION: "false"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_EVENT_CACHE: "false"
+      AUTORUN_LARAVEL_ROUTE_CACHE: "false"
+      AUTORUN_LARAVEL_VIEW_CACHE: "false"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+      PHP_POST_MAX_SIZE: "500M"
+      PHP_UPLOAD_MAX_FILE_SIZE: "500M"
+      PHP_OPCACHE_ENABLE: "1"
+    volumes:
+#      - ./storage:/var/www/html/storage
+#      - ./bootstrap/cache:/var/www/html/bootstrap/cache
+       - .:/var/www/html
+       - ./.env:/var/www/html/.env
+    depends_on:
+      - db
+      - redis
+    healthcheck:
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - pixelfed-network
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pixelfed-scheduler
+    restart: unless-stopped
+    command: ["php", "artisan", "schedule:work"]
+    stop_signal: SIGTERM
+    env_file:
+      - .env
+    environment:
+      # Laravel Auto-run Configuration
+      AUTORUN_ENABLED: "false"
+      AUTORUN_LARAVEL_MIGRATION: "false"
+      AUTORUN_LARAVEL_MIGRATION_ISOLATION: "false"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_EVENT_CACHE: "false"
+      AUTORUN_LARAVEL_ROUTE_CACHE: "false"
+      AUTORUN_LARAVEL_VIEW_CACHE: "false"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+      PHP_POST_MAX_SIZE: "500M"
+      PHP_UPLOAD_MAX_FILE_SIZE: "500M"
+      PHP_OPCACHE_ENABLE: "1"
+    volumes:
+      - ./storage:/var/www/html/storage
+      - ./bootstrap/cache:/var/www/html/bootstrap/cache
+    depends_on:
+      - db
+      - redis
+    healthcheck:
+      test: ["CMD", "healthcheck-schedule"]
+      start_period: 10s
+    networks:
+      - pixelfed-network
+  caddy:
+    image: caddy:2-alpine
+    container_name: pixelfed-caddy
+    restart: unless-stopped
+    ports:
+      - "18443:443/tcp"
+      - "18443:443/udp"   # 🔥 QUIC 핵심
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - pixelfed
+    networks:
+      - pixelfed-network
+
+networks:
+  pixelfed-network:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

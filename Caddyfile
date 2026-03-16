@@ -1,0 +1,4 @@
+pixelfed.local {
+    tls internal
+    reverse_proxy pixelfed-app:8080
+}
